@@ -1,10 +1,12 @@
 ﻿using Microsoft.SqlServer.Management.Common;
 using Microsoft.SqlServer.Management.Smo;
 using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace SQLDownloader
 {
@@ -19,26 +21,34 @@ namespace SQLDownloader
 
 		public ServerOption ServerOption { get; private set; }
 		public String WriteToFolderPath { get; private set; }
-		public void DownloadData()
+		public async Task DownloadData()
 		{
-			var db = GetDatabase();
+			//var downloadStoredProcedures = new DownloadDelegate(DownloadStoredProcedures);
+
+			List<Task> downloadActions = new List<Task>();
+
+			//Из-за того, что у нас одно подключение используется параллельно несколькими потоками из пула, иногда один поток забирает работу другого потока, при этом
+			//Возникает ошибка одновременного использования одного канала подключения разными потоками.
+			//Делаем для каждого потока своё персональное подключение, с которыми они будут работать.
 			if (ServerOption.StoredProcedure)
 			{
-				DownloadStoredProcedures(db.Name, db.StoredProcedures);
-				//DownloadData<StoredProcedure>(db.Name, db.StoredProcedures);
+				var dbSP = GetDatabase();
+				var spTask = Task.Run(() => DownloadData<StoredProcedure>(dbSP.Name, dbSP.StoredProcedures));
+				downloadActions.Add(spTask);
 			}
 			if (ServerOption.View)
 			{
-				DownloadViews(db.Name, db.Views);
-
-				//DownloadData<View>(db.Name, db.Views);
+				var dbV = GetDatabase();
+				var vTask = Task.Run(() => DownloadData<View>(dbV.Name, dbV.Views));
+				downloadActions.Add(vTask);
 			}
 			if (ServerOption.UserDefinedFunction)
 			{
-				DownloadUserDefinedFunctions(db.Name, db.UserDefinedFunctions);
-
-				//DownloadData<UserDefinedFunction>(db.Name, db.UserDefinedFunctions);
+				var dbUDF = GetDatabase();
+				var udfTask = Task.Run(() => DownloadData<UserDefinedFunction>(dbUDF.Name, dbUDF.UserDefinedFunctions));
+				downloadActions.Add(udfTask);
 			}
+			await Task.WhenAll(downloadActions.ToArray());
 
 		}
 
@@ -46,158 +56,48 @@ namespace SQLDownloader
 		{
 			Server srv = new Server(new ServerConnection()
 			{
-				ConnectionString = ServerOption.ToString()
+				ConnectionString = ServerOption.ToString(),
+
 			});
 			return srv.Databases[ServerOption.DbName];
 		}
 
-		//Пришлось писать отдельные методы, т.к. для всех элементов БД IsSystemObject конкретно типизирован и не относится к интерфейсам.
-
-		private void DownloadStoredProcedures(String dbName, StoredProcedureCollection storedProcedures)
+		private void DownloadData<T>(String dbName, SchemaCollectionBase schemaObjects) where T : ScriptSchemaObjectBase, IScriptable
 		{
 			var scriptOptions = new ScriptingOptions()
 			{
+				AllowSystemObjects = false,
 				IncludeDatabaseContext = true,
 			};
-			foreach (StoredProcedure sp in storedProcedures)
+			foreach (var item in schemaObjects)
 			{
-				if (!sp.IsSystemObject)
+				StringCollection scriptLines = null;
+				try
 				{
-					StringCollection scriptLines = null;
-					try
-					{
-						scriptLines = sp.Script(scriptOptions);
-						scriptLines.RemoveAt(0);
-						if (ServerOption.ReplaceFirstCreate)
-							scriptLines = ReplaceFirstCreate(scriptLines);
-
-					}
-					catch (Exception e)
-					{
-						var current = Console.ForegroundColor;
-						Console.ForegroundColor = ConsoleColor.Red;
-						Console.WriteLine($"{sp.Name}, {sp.Urn?.Type} : ошибка выгрузки скрипта.");
-						Console.ForegroundColor = current;
-					}
-					if (scriptLines != null)
-					{
-						var outputString = OutputSchemaObject(dbName, scriptLines);
-						WriteFile(sp, outputString);
-					}
+					scriptLines = (item as IScriptable).Script(scriptOptions);
+					scriptLines.RemoveAt(0);
+					if (ServerOption.ReplaceFirstCreate)
+						scriptLines = ReplaceFirstCreate(scriptLines);
+				}
+				catch (Exception e)
+				{
+					//var obj = item as NamedSmoObject;
+					//var name = obj.Name;
+					//var type = obj.Urn.Type;
+					//var current = Console.ForegroundColor;
+					//Console.ForegroundColor = ConsoleColor.Red;
+					//Console.WriteLine($"{name}, {type} : ошибка выгрузки скрипта.");
+					//Console.ForegroundColor = current;
 
 				}
-			}
-		}
-
-		private void DownloadUserDefinedFunctions(String dbName, UserDefinedFunctionCollection userDefinedFunctions)
-		{
-			var scriptOptions = new ScriptingOptions()
-			{
-				IncludeDatabaseContext = true,
-			};
-			foreach (UserDefinedFunction udf in userDefinedFunctions)
-			{
-				if (!udf.IsSystemObject)
+				if (scriptLines != null && scriptLines.Count != 0)
 				{
-					StringCollection scriptLines = null;
-					try
-					{
-						scriptLines = udf.Script(scriptOptions);
-						scriptLines.RemoveAt(0);
-						if (ServerOption.ReplaceFirstCreate)
-							scriptLines = ReplaceFirstCreate(scriptLines);
-
-					}
-					catch (Exception e)
-					{
-						var current = Console.ForegroundColor;
-						Console.ForegroundColor = ConsoleColor.Red;
-						Console.WriteLine($"{udf.Name}, {udf.Urn?.Type} : ошибка выгрузки скрипта.");
-						Console.ForegroundColor = current;
-					}
-					if (scriptLines != null)
-					{
-						var outputString = OutputSchemaObject(dbName, scriptLines);
-						WriteFile(udf, outputString);
-					}
-
+					var outputString = OutputSchemaObject(dbName, scriptLines);
+					WriteFile(item as NamedSmoObject, outputString);
 				}
+
 			}
 		}
-
-		private void DownloadViews(String dbName, ViewCollection viewCollection)
-		{
-			var scriptOptions = new ScriptingOptions()
-			{
-				IncludeDatabaseContext = true,
-			};
-			foreach (View v in viewCollection)
-			{
-				if (!v.IsSystemObject)
-				{
-					StringCollection scriptLines = null;
-					try
-					{
-						scriptLines = v.Script(scriptOptions);
-						scriptLines.RemoveAt(0);
-						if (ServerOption.ReplaceFirstCreate)
-							scriptLines = ReplaceFirstCreate(scriptLines);
-
-					}
-					catch (Exception e)
-					{
-						var current = Console.ForegroundColor;
-						Console.ForegroundColor = ConsoleColor.Red;
-						Console.WriteLine($"{v.Name}, {v.Urn?.Type} : ошибка выгрузки скрипта.");
-						Console.ForegroundColor = current;
-					}
-					if (scriptLines != null)
-					{
-						var outputString = OutputSchemaObject(dbName, scriptLines);
-						WriteFile(v, outputString);
-					}
-
-				}
-			}
-		}
-
-
-		//private void DownloadData<T>(String dbName, SchemaCollectionBase schemaObjects) where T : ScriptSchemaObjectBase, IScriptable
-		//{
-		//	var scriptOptions = new ScriptingOptions()
-		//	{
-		//		IncludeDatabaseContext = true,
-
-		//	};
-		//	foreach (var item in schemaObjects)
-		//	{
-		//		StringCollection scriptLines = null;
-		//		try
-		//		{
-		//			scriptLines = (item as IScriptable).Script(scriptOptions);
-		//			scriptLines.RemoveAt(0);
-		//			if (ServerOption.ReplaceFirstCreate)
-		//				scriptLines = ReplaceFirstCreate(scriptLines);
-		//		}
-		//		catch (Exception e)
-		//		{
-		//			var obj = item as NamedSmoObject;
-		//			var name = obj.Name;
-		//			var type = obj.Urn.Type;
-		//			var current = Console.ForegroundColor;
-		//			Console.ForegroundColor = ConsoleColor.Red;
-		//			Console.WriteLine($"{name}, {type} : ошибка выгрузки скрипта.");
-		//			Console.ForegroundColor = current;
-
-		//		}
-		//		if (scriptLines != null)
-		//		{
-		//			var outputString = OutputSchemaObject(dbName, scriptLines);
-		//			WriteFile(item as NamedSmoObject, outputString);
-		//		}
-
-		//	}
-		//}
 		private StringCollection ReplaceFirstCreate(StringCollection sc)
 		{
 			var preReturn = sc.Cast<String>().ToList();

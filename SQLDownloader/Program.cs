@@ -4,6 +4,7 @@ using Diconnect.Common;
 using System.IO;
 using System.Linq;
 using System.Diagnostics;
+using System.Threading;
 
 namespace SQLDownloader
 {
@@ -32,6 +33,14 @@ namespace SQLDownloader
 			var serverList = Serializer.DeserializeFromFile<Servers>(options.ServerListFilePath);
 
 			Console.WriteLine($"Начали загрузки для серверов: \n{String.Join(Environment.NewLine, serverList.Server.Select(s => s.ToString()))}");
+			CancellationTokenSource cts = new CancellationTokenSource();
+			var elapsed = Task.Run(() =>
+			{
+				while (!cts.IsCancellationRequested)
+					Console.Write(sw.Elapsed + "\r");
+			}, cts.Token);
+
+
 			Parallel.ForEach(serverList.Server, s =>
 			{
 				if (!s.IsValid())
@@ -52,11 +61,13 @@ namespace SQLDownloader
 
 				}
 				var downloader = new Downloader(s, options.WriteToFolderPath);
-				downloader.DownloadData();
+				downloader.DownloadData().GetAwaiter().GetResult();
 			});
+			cts.Cancel();
 			Console.WriteLine($"Закончили загрузки для серверов: \n{String.Join(Environment.NewLine, serverList.Server.Select(s => s.ToString()))}");
 			sw.Stop();
 			Console.WriteLine($"Прошло времени: {sw.Elapsed}");
+
 
 		}
 	}
