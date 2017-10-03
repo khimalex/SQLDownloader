@@ -1,8 +1,10 @@
 ﻿using Microsoft.SqlServer.Management.Common;
+using Microsoft.SqlServer.Management.Sdk.Sfc;
 using Microsoft.SqlServer.Management.Smo;
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Data;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -12,8 +14,10 @@ namespace SQLDownloader
 {
 	public class Downloader
 	{
-		public Downloader(ServerOption serverOption, String writeToFolderPath)
+		private readonly ILog Logger;
+		public Downloader(ServerOption serverOption, String writeToFolderPath, ILog logger)
 		{
+			Logger = logger;
 			ServerOption = serverOption;
 			WriteToFolderPath = writeToFolderPath;
 
@@ -27,27 +31,45 @@ namespace SQLDownloader
 
 			List<Task> downloadActions = new List<Task>();
 
+			var db = GetDatabase();
+
 			//Из-за того, что у нас одно подключение используется параллельно несколькими потоками из пула, иногда один поток забирает работу другого потока, при этом
 			//Возникает ошибка одновременного использования одного канала подключения разными потоками.
 			//Делаем для каждого потока своё персональное подключение, с которыми они будут работать.
 			if (ServerOption.StoredProcedure)
 			{
-				var dbSP = GetDatabase();
-				var spTask = Task.Run(() => DownloadData<StoredProcedure>(dbSP.Name, dbSP.StoredProcedures));
+				var sps = db.EnumObjects(DatabaseObjectTypes.StoredProcedure);
+				var groups = sps.Rows.Cast<DataRow>().Select((dr, index) => new { dr, index }).GroupBy(g => g.index / (sps.Rows.Count / Environment.ProcessorCount), el => el.dr["Urn"].ToString());
+
+				Logger.Log($"{ServerOption.ServerName} TotalGroupsSP: " + String.Join(",", groups.Select(g => g.Count().ToString())));
+				Logger.Log($"{ServerOption.ServerName} TotalSP: " + sps.Rows.Count);
+
+				var spTask = Task.Run(() => Download(groups));
 				downloadActions.Add(spTask);
 			}
 			if (ServerOption.View)
 			{
-				var dbV = GetDatabase();
-				var vTask = Task.Run(() => DownloadData<View>(dbV.Name, dbV.Views));
+				var sps = db.EnumObjects(DatabaseObjectTypes.View);
+				var groups = sps.Rows.Cast<DataRow>().Select((dr, index) => new { dr, index }).GroupBy(g => g.index / (sps.Rows.Count / Environment.ProcessorCount), el => el.dr["Urn"].ToString());
+
+				Logger.Log($"{ServerOption.ServerName} TotalGroupsV: " + String.Join(",", groups.Select(g => g.Count().ToString())));
+				Logger.Log($"{ServerOption.ServerName} TotalV: " + sps.Rows.Count);
+
+				var vTask = Task.Run(() => Download(groups));
 				downloadActions.Add(vTask);
 			}
 			if (ServerOption.UserDefinedFunction)
 			{
-				var dbUDF = GetDatabase();
-				var udfTask = Task.Run(() => DownloadData<UserDefinedFunction>(dbUDF.Name, dbUDF.UserDefinedFunctions));
+				var sps = db.EnumObjects(DatabaseObjectTypes.UserDefinedFunction);
+				var groups = sps.Rows.Cast<DataRow>().Select((dr, index) => new { dr, index }).GroupBy(g => g.index / (sps.Rows.Count / Environment.ProcessorCount), el => el.dr["Urn"].ToString());
+
+				Logger.Log($"{ServerOption.ServerName} TotalGroupsUDF: " + String.Join(",", groups.Select(g => g.Count().ToString())));
+				Logger.Log($"{ServerOption.ServerName} TotalUDF: " + sps.Rows.Count);
+
+				var udfTask = Task.Run(() => Download(groups));
 				downloadActions.Add(udfTask);
 			}
+
 			await Task.WhenAll(downloadActions.ToArray());
 
 		}
@@ -57,47 +79,69 @@ namespace SQLDownloader
 			Server srv = new Server(new ServerConnection()
 			{
 				ConnectionString = ServerOption.ToString(),
-
 			});
 			return srv.Databases[ServerOption.DbName];
 		}
 
-		private void DownloadData<T>(String dbName, SchemaCollectionBase schemaObjects) where T : ScriptSchemaObjectBase, IScriptable
+
+
+		private void Download(IEnumerable<IGrouping<int, string>> smoObjectsGroup)
 		{
-			var scriptOptions = new ScriptingOptions()
+			Parallel.ForEach(smoObjectsGroup, g =>
 			{
-				AllowSystemObjects = false,
-				IncludeDatabaseContext = true,
-			};
-			foreach (var item in schemaObjects)
-			{
-				StringCollection scriptLines = null;
+				Server serv = new Server(new ServerConnection()
+				{
+					ConnectionString = ServerOption.ToString(),
+				});
+
+				Scripter scripter = new Scripter
+				{
+					Server = serv
+				};
+				scripter.Options.IncludeHeaders = true;
+
+				scripter.Options.SchemaQualify = true;
+				scripter.Options.AllowSystemObjects = false;
 				try
 				{
-					scriptLines = (item as IScriptable).Script(scriptOptions);
-					scriptLines.RemoveAt(0);
-					if (ServerOption.ReplaceFirstCreate)
-						scriptLines = ReplaceFirstCreate(scriptLines);
+					foreach (var urn in g)
+					{
+						var urnn = new Urn(urn);
+						var type = urnn.Type;
+						var name = urnn.GetNameForType(type);
+						if (!urnn.GetAttribute("Schema").ToUpper().Equals("dbo".ToUpper()))
+						{
+							continue;
+						}
+						var smoObject = serv.GetSmoObject(urnn);
+						var scriptLines = scripter.Script(new SqlSmoObject[] { smoObject });
+
+						Logger.Log($"Forming script: '{name}'");
+						if (scriptLines.Count == 0)
+						{
+							Logger.Log($"Неизвестная ошибка формирования скрипта для: '{name}'");
+							continue;
+						}
+						//throw new IndexOutOfRangeException($"{nameof(scriptLines)}.Count == {scriptLines.Count}. '{name}'");
+						scriptLines.RemoveAt(0);
+						var outputString = OutputSchemaObject(ServerOption.DbName, scriptLines);
+
+						var extension = "sql";
+						var fileName = $"{name}.{type}.{extension}";
+						var fullFilePath = Path.Combine(WriteToFolderPath, ServerOption.ServerName, DateTime.Now.ToString("yyyyMMdd"), fileName);
+
+						Logger.Log($"Write File: '{fullFilePath}'");
+						WriteFile(fullFilePath, outputString);
+					}
 				}
 				catch (Exception e)
 				{
-					//var obj = item as NamedSmoObject;
-					//var name = obj.Name;
-					//var type = obj.Urn.Type;
-					//var current = Console.ForegroundColor;
-					//Console.ForegroundColor = ConsoleColor.Red;
-					//Console.WriteLine($"{name}, {type} : ошибка выгрузки скрипта.");
-					//Console.ForegroundColor = current;
-
+					Logger.Log(e);
 				}
-				if (scriptLines != null && scriptLines.Count != 0)
-				{
-					var outputString = OutputSchemaObject(dbName, scriptLines);
-					WriteFile(item as NamedSmoObject, outputString);
-				}
+			});
 
-			}
 		}
+
 		private StringCollection ReplaceFirstCreate(StringCollection sc)
 		{
 			var preReturn = sc.Cast<String>().ToList();
@@ -129,18 +173,11 @@ namespace SQLDownloader
 		}
 
 
-		private void WriteFile(NamedSmoObject obj, string sqlContent)
+		private void WriteFile(String fullFilePath, string sqlContent)
 		{
 			//Считаем, Что директории существуют - подготовили их перед стартом загрузок.
-			var name = obj.Name;
-			var type = obj.Urn.Type;
-			var extension = "sql";
-			var fileName = $"{name}.{type}.{extension}";
-
-			var fullFilePath = Path.Combine(WriteToFolderPath, ServerOption.ServerName, DateTime.Now.ToString("yyyyMMdd"), fileName);
 			File.Delete(fullFilePath);
 			File.WriteAllText(fullFilePath, sqlContent);
-			//var fileName = 
 		}
 
 	}

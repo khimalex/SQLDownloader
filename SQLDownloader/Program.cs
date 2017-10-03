@@ -17,29 +17,23 @@ namespace SQLDownloader
 			sw.Start();
 			CLOptions options = new CLOptions();
 			CommandLine.Parser.Default.ParseArgumentsStrict(args, options);
+			var logger = GetLogger(options);
 
 			if (!File.Exists(options.ServerListFilePath))
 			{
-				Console.WriteLine($"Файл '{options.ServerListFilePath}' не существует.");
+				logger.Log($"Файл '{options.ServerListFilePath}' не существует.");
 				Environment.Exit(-1);
 			}
 			if (!Directory.Exists(options.WriteToFolderPath))
 			{
-				Console.WriteLine($"Директория '{options.WriteToFolderPath}' не существует.");
+				logger.Log($"Директория '{options.WriteToFolderPath}' не существует.");
 				Directory.CreateDirectory(options.WriteToFolderPath);
-				Console.WriteLine($"Директорию '{options.WriteToFolderPath}' создали.");
+				logger.Log($"Директорию '{options.WriteToFolderPath}' создали.");
 			}
 
 			var serverList = Serializer.DeserializeFromFile<Servers>(options.ServerListFilePath);
 
-			Console.WriteLine($"Начали загрузки для серверов: \n{String.Join(Environment.NewLine, serverList.Server.Select(s => s.ToString()))}");
-			CancellationTokenSource cts = new CancellationTokenSource();
-			var elapsed = Task.Run(() =>
-			{
-				while (!cts.IsCancellationRequested)
-					Console.Write(sw.Elapsed + "\r");
-			}, cts.Token);
-
+			logger.Log($"Начали загрузки для серверов: \n{String.Join(Environment.NewLine, serverList.Server.Select(s => s.ToString()))}");
 
 			Parallel.ForEach(serverList.Server, s =>
 			{
@@ -47,7 +41,7 @@ namespace SQLDownloader
 				{
 					var current = Console.ForegroundColor;
 					Console.ForegroundColor = ConsoleColor.Red;
-					Console.WriteLine($"Неправильные настройки для cервера: '{s}' или не задано имя сервера: '{s.ServerName}'");
+					logger.Log($"Неправильные настройки для cервера: '{s}' или не задано имя сервера: '{s.ServerName}'");
 					Console.ForegroundColor = current;
 					return;
 				}
@@ -55,20 +49,33 @@ namespace SQLDownloader
 				var serverDataDir = Path.Combine(options.WriteToFolderPath, s.ServerName, DateTime.Now.ToString("yyyyMMdd"));
 				if (!Directory.Exists(serverDataDir))
 				{
-					Console.WriteLine($"Директория '{serverDataDir}' не существует.");
+					logger.Log($"Директория '{serverDataDir}' не существует.");
 					Directory.CreateDirectory(serverDataDir);
-					Console.WriteLine($"Директорию '{serverDataDir}' создали.");
+					logger.Log($"Директорию '{serverDataDir}' создали.");
 
 				}
-				var downloader = new Downloader(s, options.WriteToFolderPath);
+				var downloader = new Downloader(s, options.WriteToFolderPath, logger);
 				downloader.DownloadData().GetAwaiter().GetResult();
 			});
-			cts.Cancel();
-			Console.WriteLine($"Закончили загрузки для серверов: \n{String.Join(Environment.NewLine, serverList.Server.Select(s => s.ToString()))}");
+			logger.Log($"Закончили загрузки для серверов: \n{String.Join(Environment.NewLine, serverList.Server.Select(s => s.ToString()))}");
 			sw.Stop();
-			Console.WriteLine($"Прошло времени: {sw.Elapsed}");
+			logger.Log($"Прошло времени: {sw.Elapsed}");
+		}
 
-
+		static ILog GetLogger(CLOptions options)
+		{
+			if (options.OutputToCmd && !String.IsNullOrEmpty(options.LogFile))
+			{
+				return new ToConsoleAndFile(options.LogFile);
+			}
+			else if (!String.IsNullOrEmpty(options.LogFile))
+			{
+				return new ToFile(options.LogFile);
+			}
+			else
+			{
+				return new ToConsole(options.OutputToCmd);
+			}
 		}
 	}
 }
