@@ -6,8 +6,6 @@ namespace SQLDownloader
 {
 	public class Servers
 	{
-		public const String CREATE = "CREATE";
-		public const String ALTER = "ALTER";
 		[XmlElement]
 		public ServerOption[] Server { get; set; }
 	}

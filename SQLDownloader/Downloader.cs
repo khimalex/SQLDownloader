@@ -15,12 +15,13 @@ namespace SQLDownloader
 	public class Downloader
 	{
 		private readonly ILog Logger;
+		private readonly ReplacerFactories ReplacerFactories;
 		public Downloader(ServerOption serverOption, String writeToFolderPath, ILog logger)
 		{
 			Logger = logger;
 			ServerOption = serverOption;
 			WriteToFolderPath = writeToFolderPath;
-
+			ReplacerFactories = new ReplacerFactories();
 		}
 
 		public ServerOption ServerOption { get; private set; }
@@ -122,8 +123,14 @@ namespace SQLDownloader
 							Logger.Log($"Неизвестная ошибка формирования скрипта для: '{name}'");
 							continue;
 						}
-						//throw new IndexOutOfRangeException($"{nameof(scriptLines)}.Count == {scriptLines.Count}. '{name}'");
 						scriptLines.RemoveAt(0);
+
+						if (ServerOption.ReplaceFirstCreate)
+						{
+							var replacer = ReplacerFactories.GetReplacer(type);
+							scriptLines = replacer.Replace(scriptLines);
+						}
+
 						var outputString = OutputSchemaObject(ServerOption.DbName, scriptLines);
 
 						var extension = "sql";
@@ -142,17 +149,6 @@ namespace SQLDownloader
 
 		}
 
-		private StringCollection ReplaceFirstCreate(StringCollection sc)
-		{
-			var preReturn = sc.Cast<String>().ToList();
-			var stringWithCreate = preReturn.Last();// Where(s => s.Split('\n').Count() > 0).FirstOrDefault(s => s.StartsWith(create, true, CultureInfo.InvariantCulture));
-			var createStart = stringWithCreate.IndexOf(Servers.CREATE, StringComparison.InvariantCultureIgnoreCase);
-			var removedCreate = stringWithCreate.Remove(createStart, Servers.CREATE.Length);
-			var addedAlter = removedCreate.Insert(createStart, Servers.ALTER.ToUpper() + " ");
-			sc.Remove(stringWithCreate);
-			sc.Add(addedAlter);
-			return sc;
-		}
 		private string OutputSchemaObject(String dbName, StringCollection sc)
 		{
 			var lines = sc.Cast<String>().ToList();

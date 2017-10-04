@@ -56,7 +56,7 @@ namespace SQLDownloader
 		public ToFile(String logFilePath)
 		{
 
-			LogDirectoryName = Path.GetDirectoryName(logFilePath);
+			LogDirectoryName = String.IsNullOrEmpty(Path.GetDirectoryName(logFilePath)) ? Directory.GetCurrentDirectory() : Path.GetDirectoryName(logFilePath);
 			LogFileName = Path.GetFileName(logFilePath);
 
 			LogFilePath = Path.Combine(LogDirectoryName, LogFileName);
